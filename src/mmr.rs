@@ -413,7 +413,7 @@ fn calculate_peak_root<'a, T: 'a, M: Merge<Item = T>, I: Iterator<Item = &'a T>>
     Err(Error::CorruptedProof)
 }
 
-fn calculate_peaks_hashes<'a, T: 'a + Clone, M: Merge<Item = T>, I: Iterator<Item = &'a T>>(
+pub fn calculate_peaks_hashes<'a, T: 'a + Clone, M: Merge<Item = T>, I: Iterator<Item = &'a T>>(
     mut leaves: Vec<(u64, T)>,
     mmr_size: u64,
     mut proof_iter: I,
