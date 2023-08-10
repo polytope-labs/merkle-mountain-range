@@ -14,7 +14,7 @@ use num::{Integer, Zero};
 use proptest::prelude::*;
 use rand::{seq::SliceRandom, thread_rng};
 
-fn test_mmr(count: u32, proof_elem: Vec<u32>) {
+pub fn test_mmr(count: u32, proof_elem: Vec<u32>) {
     let store = MemStore::default();
     let mut mmr = MemMMR::<_, MergeNumberHash>::new(0, &store);
     let positions: Vec<u64> = (0u32..count)
@@ -26,7 +26,7 @@ fn test_mmr(count: u32, proof_elem: Vec<u32>) {
         .gen_proof(
             proof_elem
                 .iter()
-                .map(|elem| dbg!(positions[*elem as usize]))
+                .map(|elem| positions[*elem as usize])
                 .collect(),
         )
         .expect("gen proof");
@@ -390,8 +390,8 @@ fn parent_indices(indices: Vec<usize>) -> Vec<usize> {
 
     for index in indices {
         let parent = div_floor(index, 2);
-        if matches!(parents.last(), Some(p) if parent == *p){
-                continue;
+        if matches!(parents.last(), Some(p) if parent == *p) {
+            continue;
         }
         parents.push(parent);
     }
