@@ -14,7 +14,11 @@ use num::{Integer, Zero};
 use proptest::prelude::*;
 use rand::{seq::SliceRandom, thread_rng};
 
-pub fn test_mmr(count: u32, proof_elem: Vec<u32>) {
+pub fn test_mmr(count: u32, mut proof_elem: Vec<u32>) {
+    // dbg!(count);
+    // dbg!(&proof_elem);
+    proof_elem.sort();
+
     let store = MemStore::default();
     let mut mmr = MemMMR::<_, MergeNumberHash>::new(0, &store);
     let positions: Vec<u64> = (0u32..count)
@@ -62,10 +66,33 @@ pub fn test_mmr(count: u32, proof_elem: Vec<u32>) {
 
     custom_leaves.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let calculated = calculate_peak_roots(custom_leaves, proof.mmr_size(), proof_nodes);
+    let calculated =
+        calculate_peak_roots(custom_leaves.clone(), proof.mmr_size(), proof_nodes.clone());
     let mut root_hash = [0u8; 32];
     root_hash.copy_from_slice(&root.0);
     assert_eq!(root_hash, calculated);
+
+    // check subtree heights
+    let subtree_heights = get_subtree_heights(count as u64);
+    let peaks = get_peaks(proof.mmr_size());
+    let peak_heights = peaks
+        .iter()
+        .cloned()
+        .map(|pos| pos_height_in_tree(pos) as u32)
+        .collect::<Vec<_>>();
+
+    assert_eq!(subtree_heights, peak_heights);
+
+    let mut custom_leaves = custom_leaves
+        .into_iter()
+        .zip(proof_elem.clone())
+        .map(|((_pos, k_index, leaf), index)| (index as usize, k_index, leaf))
+        .collect::<Vec<_>>();
+
+    custom_leaves.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let hash = calculate_peak_roots_simplified(custom_leaves, proof_nodes, count as u64);
+    assert_eq!(root_hash, hash);
 }
 
 fn test_gen_new_root_from_proof(count: u32) {
@@ -112,6 +139,17 @@ fn test_empty_mmr_root() {
     let store = MemStore::<NumberHash>::default();
     let mmr = MemMMR::<_, MergeNumberHash>::new(0, &store);
     assert_eq!(Err(Error::GetRootOnEmpty), mmr.get_root());
+}
+
+#[test]
+fn test_mmr_432_elems() {
+    test_mmr(
+        157,
+        vec![
+            4, 9, 11, 14, 17, 19, 23, 26, 36, 38, 49, 56, 67, 76, 79, 84, 85, 87, 102, 103, 106,
+            111, 114, 128, 132, 134, 140, 146, 150, 154,
+        ],
+    );
 }
 
 #[test]
@@ -397,6 +435,108 @@ fn parent_indices(indices: Vec<usize>) -> Vec<usize> {
     }
 
     parents
+}
+
+pub fn get_subtree_heights(leaves_length: u64) -> Vec<u32> {
+    let mut indices = vec![];
+    let mut current = leaves_length;
+    loop {
+        if current == 0 {
+            break;
+        }
+        let log = current.ilog2();
+        indices.push(log);
+        current = current - 2u64.pow(log);
+    }
+
+    indices
+}
+
+pub fn calculate_peak_roots_simplified(
+    mut leaves: Vec<(usize, usize, Hash)>,
+    mut proof_iter: Vec<Hash>,
+    leaves_length: u64,
+) -> Hash {
+    let subtree_heights = get_subtree_heights(leaves_length);
+    let mut peak_roots = vec![];
+
+    // special handle the only 1 leaf MMR
+    if leaves_length == 1 && leaves.len() == 1 && leaves[0].0 == 0 {
+        return leaves[0].2;
+    }
+
+    leaves.dedup_by(|a, b| a.0 == b.0);
+
+    let mut current_subtree = 0;
+    for height in subtree_heights {
+        current_subtree += 2usize.pow(height);
+
+        let mut peak_leaves: Vec<_> =
+            take_while_vec(&mut leaves, |(index, _, _)| *index < current_subtree);
+
+        match peak_leaves.len() {
+            1 if height == 0 => {
+                // this is a peak root.
+                peak_roots.push(peak_leaves.pop().unwrap().2);
+            }
+            0 => {
+                if proof_iter.len() > 0 {
+                    // the next proof item is a peak
+                    let peak = proof_iter.remove(0);
+                    peak_roots.push(peak)
+                } else {
+                    break;
+                }
+            }
+            _ => {
+                let tree_leaves = peak_leaves
+                    .into_iter()
+                    .map(|(_leaf_index, k_index, leaf)| (k_index, leaf))
+                    .collect::<Vec<_>>();
+
+                let mut layer_indices: Vec<_> = tree_leaves.iter().map(|(i, _)| *i).collect();
+                let mut tree: Vec<Vec<_>> = vec![];
+
+                for i in 0..height {
+                    let node_len = 2usize.pow(height - i);
+                    // we have all the nodes
+                    if layer_indices.len() == node_len {
+                        // fill the remaining layers
+                        tree.extend((i..height).map(|_| vec![]));
+                        break;
+                    }
+
+                    let siblings = sibling_indices(layer_indices.clone());
+                    let diff = difference(&siblings, &layer_indices);
+                    let len = diff.len();
+                    let layer = diff.into_iter().zip(proof_iter.drain(..len)).collect();
+                    tree.push(layer);
+                    layer_indices = parent_indices(siblings);
+                }
+
+                // insert the leaves
+                tree[0].extend(&tree_leaves);
+                tree[0].sort_by(|a, b| a.0.cmp(&b.0));
+
+                let peak_root = calculate_merkle_multi_root(tree);
+                peak_roots.push(peak_root);
+            }
+        };
+    }
+
+    // bagging peaks
+    // bagging from right to left via hash(right, left).
+    while peak_roots.len() > 1 {
+        let right_peak = peak_roots.pop().expect("peak_roots is > 1; qed");
+        let left_peak = peak_roots.pop().expect("peak_roots is > 1; qed");
+        let mut buf = vec![];
+        buf.extend(&right_peak);
+        buf.extend(&left_peak);
+
+        peak_roots.push(blake2b(&buf));
+    }
+
+    peak_roots.pop().unwrap()
 }
 
 pub fn calculate_peak_roots(
